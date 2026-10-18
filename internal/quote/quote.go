@@ -9,7 +9,7 @@ import (
 var (
 	ErrInvalidQuery = errors.New("use region codes MOW, LED or KZN and weight_grams between 1 and 30000")
 	ErrUnavailable  = errors.New("all providers unavailable")
-	ErrBusy         = errors.New("provider capacity exhausted")
+	ErrBusy         = errors.New("quote capacity exhausted")
 )
 
 type Query struct {

@@ -12,14 +12,19 @@ import (
 	"github.com/madfanat/quota/internal/quote"
 )
 
+type Service interface {
+	GetQuotes(context.Context, quote.Query) (quote.Result, error)
+	GetQuotesSequential(context.Context, quote.Query) (quote.Result, error)
+}
+
 type Handler struct {
-	service    *quote.Service
+	service    Service
 	admission  chan struct{}
 	budget     time.Duration
 	sequential bool
 }
 
-func New(service *quote.Service, maxRequests int, budget time.Duration, sequential bool) http.Handler {
+func New(service Service, maxRequests int, budget time.Duration, sequential bool) http.Handler {
 	h := &Handler{service: service, admission: make(chan struct{}, maxRequests), budget: budget, sequential: sequential}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/quotes", h.quotes)

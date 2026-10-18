@@ -4,7 +4,7 @@ test:
 	go test ./...
 
 integration:
-	go test -v ./tests/integration
+	go test -race -tags=integration -v ./tests/integration
 
 check:
 	go vet ./...

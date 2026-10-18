@@ -147,7 +147,7 @@ func TestCancellationReturnsPermit(t *testing.T) {
 	if err := <-done; !errors.Is(err, context.Canceled) {
 		t.Fatalf("error = %v", err)
 	}
-	// The completed call must have returned its only permit.
+
 	ctx2, cancel2 := context.WithCancel(context.Background())
 	defer cancel2()
 	go func() { _, err := s.GetQuotes(ctx2, testQuery()); done <- err }()

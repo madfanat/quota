@@ -17,3 +17,25 @@ jobs:
       - run: test -z "$(gofmt -l cmd internal tests)"
       - run: make check
       - run: make vuln
+
+  integration:
+    runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis:8.2.2-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 1s
+          --health-timeout 1s
+          --health-retries 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.2'
+          cache: false
+      - run: make integration
+        env:
+          REDIS_TEST_ADDR: 127.0.0.1:6379

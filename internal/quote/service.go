@@ -91,14 +91,16 @@ func (s *Service) getQuotes(ctx context.Context, query Query, concurrent bool) (
 		}
 		return Result{}, ErrUnavailable
 	}
-	slices.SortFunc(result.Quotes, func(a, b Quote) int {
-		if price := cmp.Compare(a.PriceMinor, b.PriceMinor); price != 0 {
-			return price
-		}
-		return cmp.Compare(a.Provider, b.Provider)
-	})
+	slices.SortFunc(result.Quotes, compareQuotes)
 	result.Complete = len(result.FailedProviders) == 0
 	return result, nil
+}
+
+func compareQuotes(a, b Quote) int {
+	if price := cmp.Compare(a.PriceMinor, b.PriceMinor); price != 0 {
+		return price
+	}
+	return cmp.Compare(a.Provider, b.Provider)
 }
 
 func (s *Service) fetch(ctx context.Context, provider Provider, query Query) (Quote, error) {
