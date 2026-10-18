@@ -103,6 +103,8 @@ func (s *CachedService) Stats() CacheStats {
 	return CacheStats{Hits: s.hits.Load(), Misses: s.misses.Load(), Errors: s.errors.Load()}
 }
 
+func (s *CachedService) AdmittedRequests() int { return len(s.callers) }
+
 func (s *CachedService) load(ctx context.Context, query Query) (Result, error) {
 	cacheCtx, cancel := context.WithTimeout(ctx, s.config.Timeout)
 	result, err := s.cache.Get(cacheCtx, query)

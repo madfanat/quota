@@ -1,5 +1,7 @@
 .PHONY: test integration check build demo vuln tools generate
 
+.DEFAULT_GOAL := build
+
 PROTOC ?= protoc
 PROTOC_VERSION := 36.2
 PROTOC_GEN_GO_VERSION := v1.36.12
