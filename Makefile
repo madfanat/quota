@@ -1,4 +1,4 @@
-.PHONY: test integration check build demo vuln tools generate
+.PHONY: test integration check build demo vuln tools generate up down
 
 .DEFAULT_GOAL := build
 
@@ -22,7 +22,7 @@ test:
 	go test ./...
 
 integration:
-	go test -race -tags=integration -v ./tests/integration
+	go test -race -count=1 -tags=integration -v ./tests/integration
 
 check:
 	go vet ./...
@@ -36,6 +36,12 @@ build:
 	go build -o bin/server ./cmd/server
 	go build -o bin/simulators ./cmd/simulators
 	go build -o bin/quotacli ./cmd/quotacli
+
+up:
+	docker compose up --build --wait --wait-timeout 60
+
+down:
+	docker compose down
 
 demo:
 	curl --fail-with-body --silent --show-error 'http://127.0.0.1:8080/v1/quotes?origin=MOW&destination=LED&weight_grams=1000'

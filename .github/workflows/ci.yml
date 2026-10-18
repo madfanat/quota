@@ -7,7 +7,8 @@ permissions:
 
 jobs:
   check:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -19,7 +20,8 @@ jobs:
       - run: make vuln
 
   integration:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
     services:
       redis:
         image: redis:8.2.2-alpine
@@ -39,3 +41,29 @@ jobs:
       - run: make integration
         env:
           REDIS_TEST_ADDR: 127.0.0.1:6379
+
+  compose:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker compose config --quiet
+      - run: make up
+      - run: make demo
+      - run: docker compose exec -T api quotacli
+      - run: docker compose exec -T prometheus promtool check config /etc/prometheus/prometheus.yml
+      - name: Verify Prometheus scrape
+        run: |
+          for attempt in {1..10}; do
+            if curl --fail --silent --show-error --max-time 2 --get \
+              --data-urlencode 'query=up{job="quota"}' http://127.0.0.1:9091/api/v1/query \
+              | jq --exit-status '.data.result[0].value[1] == "1"'; then
+              exit 0
+            fi
+            sleep 1
+          done
+          exit 1
+      - if: failure()
+        run: docker compose logs --no-color
+      - if: always()
+        run: make down

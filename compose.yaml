@@ -1,0 +1,87 @@
+name: quota
+
+services:
+  api:
+    build: .
+    image: quota:local
+    command:
+      - server
+      - -addr=0.0.0.0:8080
+      - -grpc-addr=0.0.0.0:9090
+      - -swift-url=http://swift:8081/quote
+      - -steady-url=http://steady:8082/quote
+      - -redis-addr=redis:6379
+    environment:
+      GOMAXPROCS: "2"
+      GOMEMLIMIT: 192MiB
+    cpus: 2
+    mem_limit: 256m
+    ports:
+      - 127.0.0.1:8080:8080
+      - 127.0.0.1:9090:9090
+      - 127.0.0.1:9091:9091
+    depends_on:
+      swift:
+        condition: service_healthy
+      steady:
+        condition: service_healthy
+    healthcheck:
+      test: [CMD, wget, -q, -O, /dev/null, http://127.0.0.1:8080/healthz]
+      interval: 2s
+      timeout: 1s
+      retries: 15
+    stop_grace_period: 5s
+
+  swift:
+    image: quota:local
+    pull_policy: never
+    command: [simulators, -provider=swift, -addr=0.0.0.0:8081, -delay=80ms]
+    healthcheck:
+      test: [CMD, wget, -q, -O, /dev/null, http://127.0.0.1:8081/healthz]
+      interval: 2s
+      timeout: 1s
+      retries: 15
+
+  steady:
+    image: quota:local
+    pull_policy: never
+    command: [simulators, -provider=steady, -addr=0.0.0.0:8082, -delay=120ms]
+    healthcheck:
+      test: [CMD, wget, -q, -O, /dev/null, http://127.0.0.1:8082/healthz]
+      interval: 2s
+      timeout: 1s
+      retries: 15
+
+  redis:
+    image: redis:8.2.2-alpine
+    command: [redis-server, --appendonly, "yes", --maxmemory, 64mb, --maxmemory-policy, allkeys-lru]
+    mem_limit: 128m
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: [CMD, redis-cli, ping]
+      interval: 2s
+      timeout: 1s
+      retries: 15
+
+  prometheus:
+    image: prom/prometheus:v3.15.0
+    network_mode: service:api
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=24h
+      - --storage.tsdb.retention.size=128MB
+      - --web.listen-address=:9091
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    healthcheck:
+      test: [CMD, wget, -q, -O, /dev/null, http://127.0.0.1:9091/-/ready]
+      interval: 2s
+      timeout: 1s
+      retries: 15
+
+volumes:
+  redis-data:
+  prometheus-data:

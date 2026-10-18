@@ -8,8 +8,10 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -34,6 +36,8 @@ func run() error {
 	addr := flag.String("addr", "127.0.0.1:8080", "HTTP listen address")
 	grpcAddr := flag.String("grpc-addr", "127.0.0.1:9090", "gRPC listen address")
 	adminAddr := flag.String("admin-addr", "127.0.0.1:6060", "loopback metrics and profiling address")
+	swiftURL := flag.String("swift-url", "http://127.0.0.1:8081/quote", "swift provider endpoint")
+	steadyURL := flag.String("steady-url", "http://127.0.0.1:8082/quote", "steady provider endpoint")
 	maxCalls := flag.Int("max-provider-calls", 16, "maximum provider calls across all requests")
 	maxRequests := flag.Int("max-requests", 32, "maximum admitted quote requests")
 	budget := flag.Duration("request-timeout", 600*time.Millisecond, "total quote request budget")
@@ -50,6 +54,12 @@ func run() error {
 	if _, _, err := net.SplitHostPort(*redisAddr); err != nil {
 		return fmt.Errorf("redis-addr must be a host:port address: %w", err)
 	}
+	for name, endpoint := range map[string]string{"swift-url": *swiftURL, "steady-url": *steadyURL} {
+		u, err := url.Parse(endpoint)
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" || u.User != nil || strings.ContainsAny(endpoint, "?#") {
+			return fmt.Errorf("%s must be an HTTP(S) endpoint without credentials, query or fragment", name)
+		}
+	}
 	if *maxCalls < 1 || *maxRequests < 1 || *budget <= 0 || *providerTimeout <= 0 || *cacheTTL < time.Millisecond || *cacheTimeout <= 0 {
 		return errors.New("limits and timeouts must be positive; cache TTL must be at least 1ms")
 	}
@@ -62,8 +72,8 @@ func run() error {
 	defer transport.CloseIdleConnections()
 	metrics := telemetry.New()
 	service, err := quota.NewService([]quota.Provider{
-		metrics.Provider(carrierhttp.New("swift", "http://127.0.0.1:8081/quote", client)),
-		metrics.Provider(carrierhttp.New("steady", "http://127.0.0.1:8082/quote", client)),
+		metrics.Provider(carrierhttp.New("swift", *swiftURL, client)),
+		metrics.Provider(carrierhttp.New("steady", *steadyURL, client)),
 	}, *maxCalls, *providerTimeout)
 	if err != nil {
 		return fmt.Errorf("configure service: %w", err)
