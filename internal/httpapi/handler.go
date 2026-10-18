@@ -30,6 +30,8 @@ func New(service *quote.Service, maxRequests int, budget time.Duration, sequenti
 }
 
 func (h *Handler) quotes(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), h.budget)
+	defer cancel()
 	params := r.URL.Query()
 	weight, err := strconv.Atoi(params.Get("weight_grams"))
 	if err != nil {
@@ -41,6 +43,10 @@ func (h *Handler) quotes(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
+	if err := ctx.Err(); err != nil {
+		writeError(w, err)
+		return
+	}
 	select {
 	case h.admission <- struct{}{}:
 		defer func() { <-h.admission }()
@@ -48,8 +54,6 @@ func (h *Handler) quotes(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "request capacity exhausted"})
 		return
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), h.budget)
-	defer cancel()
 	var result quote.Result
 	if h.sequential {
 		result, err = h.service.GetQuotesSequential(ctx, query)
@@ -57,15 +61,22 @@ func (h *Handler) quotes(w http.ResponseWriter, r *http.Request) {
 		result, err = h.service.GetQuotes(ctx, query)
 	}
 	if err != nil {
-		status := http.StatusServiceUnavailable
-		if errors.Is(err, context.DeadlineExceeded) {
-			status = http.StatusGatewayTimeout
-		}
-		slog.Warn("quote request failed", "error", err)
-		writeJSON(w, status, map[string]string{"error": err.Error()})
+		writeError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, result)
+}
+
+func writeError(w http.ResponseWriter, err error) {
+	if errors.Is(err, context.Canceled) {
+		return
+	}
+	status := http.StatusServiceUnavailable
+	if errors.Is(err, context.DeadlineExceeded) {
+		status = http.StatusGatewayTimeout
+	}
+	slog.Warn("quote request failed", "error", err)
+	writeJSON(w, status, map[string]string{"error": err.Error()})
 }
 
 func writeJSON(w http.ResponseWriter, status int, value any) {

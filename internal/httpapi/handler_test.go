@@ -36,7 +36,7 @@ func TestAdmission(t *testing.T) {
 		case <-ctx.Done():
 			return quote.Quote{}, ctx.Err()
 		}
-	}}}, 2)
+	}}}, 2, time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -67,7 +67,7 @@ func TestAdmission(t *testing.T) {
 func TestFailureStatuses(t *testing.T) {
 	s, err := quote.NewService([]quote.Provider{provider{func(context.Context, quote.Query) (quote.Quote, error) {
 		return quote.Quote{}, errors.New("offline")
-	}}}, 1)
+	}}}, 1, time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}

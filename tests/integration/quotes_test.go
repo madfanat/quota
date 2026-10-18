@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"sync"
 	"testing"
 	"time"
@@ -24,7 +25,7 @@ func TestHTTPQuotes(t *testing.T) {
 	service, err := quote.NewService([]quote.Provider{
 		carrierhttp.New("swift", swift.URL+"/quote", client),
 		carrierhttp.New("steady", steady.URL+"/quote", client),
-	}, 2)
+	}, 2, time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -91,7 +92,7 @@ func TestSimulatorsObserveGlobalLimit(t *testing.T) {
 		t.Cleanup(server.Close)
 		return carrierhttp.New(name, server.URL+"/quote", &http.Client{Timeout: 4 * time.Second})
 	}
-	service, err := quote.NewService([]quote.Provider{newProvider("swift"), newProvider("steady")}, 2)
+	service, err := quote.NewService([]quote.Provider{newProvider("swift"), newProvider("steady")}, 2, time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -137,7 +138,7 @@ func TestDelayedProviders(t *testing.T) {
 		sims = append(sims, sim)
 		providers = append(providers, carrierhttp.New(name, server.URL+"/quote", &http.Client{Timeout: time.Second}))
 	}
-	service, err := quote.NewService(providers, 2)
+	service, err := quote.NewService(providers, 2, time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -158,5 +159,135 @@ func TestDelayedProviders(t *testing.T) {
 		if stats.Active != 0 || stats.MaxConcurrent != 1 || stats.Calls != 2 {
 			t.Fatalf("simulator counters = %+v", stats)
 		}
+	}
+}
+
+func TestHTTPProviderFailures(t *testing.T) {
+	for _, tc := range []struct {
+		name            string
+		broken          string
+		bothBroken      bool
+		requestTimeout  time.Duration
+		providerTimeout time.Duration
+		status          int
+	}{
+		{"failing", "status", false, time.Second, time.Second, 200},
+		{"malformed", "json", false, time.Second, time.Second, 200},
+		{"slow", "slow", false, time.Second, 50 * time.Millisecond, 200},
+		{"all failing", "status", true, time.Second, time.Second, 503},
+		{"all malformed", "json", true, time.Second, time.Second, 503},
+		{"all provider deadlines", "slow", true, time.Second, 50 * time.Millisecond, 503},
+		{"request deadline", "slow", true, 50 * time.Millisecond, time.Second, 504},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			newProvider := func(name string, broken bool) quote.Provider {
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if broken {
+						switch tc.broken {
+						case "status":
+							http.Error(w, "offline", http.StatusServiceUnavailable)
+						case "json":
+							w.Write([]byte(`{`))
+						case "slow":
+							<-r.Context().Done()
+						}
+						return
+					}
+					simulators.New(name, 10*time.Millisecond, false).Handler().ServeHTTP(w, r)
+				}))
+				t.Cleanup(server.Close)
+				return carrierhttp.New(name, server.URL+"/quote", server.Client())
+			}
+			service, err := quote.NewService([]quote.Provider{
+				newProvider("swift", true), newProvider("steady", tc.bothBroken),
+			}, 2, tc.providerTimeout)
+			if err != nil {
+				t.Fatal(err)
+			}
+			handler := httpapi.New(service, 4, tc.requestTimeout, false)
+			w := httptest.NewRecorder()
+			handler.ServeHTTP(w, httptest.NewRequest("GET", "/v1/quotes?origin=MOW&destination=LED&weight_grams=1000", nil))
+			if w.Code != tc.status {
+				t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
+			}
+			if tc.status == 200 {
+				var result quote.Result
+				if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
+					t.Fatal(err)
+				}
+				if result.Complete || len(result.Quotes) != 1 || result.Quotes[0].Provider != "steady" || !reflect.DeepEqual(result.FailedProviders, []string{"swift"}) {
+					t.Fatalf("result = %+v", result)
+				}
+			}
+		})
+	}
+}
+
+func TestRepeatedHTTPCancellation(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	started := make(chan struct{}, 2)
+	stopped := make(chan struct{}, 2)
+	var providers []quote.Provider
+	for _, name := range []string{"swift", "steady"} {
+		sim := simulators.New(name, 0, false).Handler()
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Query().Get("weight_grams") == "2000" {
+				sim.ServeHTTP(w, r)
+				return
+			}
+			started <- struct{}{}
+			<-r.Context().Done()
+			stopped <- struct{}{}
+		}))
+		t.Cleanup(server.Close)
+		providers = append(providers, carrierhttp.New(name, server.URL+"/quote", server.Client()))
+	}
+	service, err := quote.NewService(providers, 2, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := httpapi.New(service, 1, time.Second, false)
+	for range 20 {
+		requestCtx, stop := context.WithCancel(ctx)
+		req := httptest.NewRequest("GET", "/v1/quotes?origin=MOW&destination=LED&weight_grams=1000", nil).WithContext(requestCtx)
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			handler.ServeHTTP(httptest.NewRecorder(), req)
+		}()
+		for range 2 {
+			select {
+			case <-started:
+			case <-ctx.Done():
+				stop()
+				t.Fatal("provider did not start; a permit may have leaked")
+			}
+		}
+		stop()
+		select {
+		case <-done:
+		case <-ctx.Done():
+			t.Fatal("cancelled handler did not stop")
+		}
+		for range 2 {
+			select {
+			case <-stopped:
+			case <-ctx.Done():
+				t.Fatal("provider HTTP handler did not stop")
+			}
+		}
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, httptest.NewRequest("GET", "/v1/quotes?origin=MOW&destination=LED&weight_grams=2000", nil).WithContext(ctx))
+		var result quote.Result
+		if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
+			t.Fatal(err)
+		}
+		if w.Code != 200 || !result.Complete || len(result.Quotes) != 2 {
+			t.Fatalf("after cancellation: status = %d, result = %+v", w.Code, result)
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		t.Fatal(err)
 	}
 }

@@ -39,9 +39,6 @@ func (p *Provider) GetQuote(ctx context.Context, query quote.Query) (quote.Quote
 		return quote.Quote{}, err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return quote.Quote{}, fmt.Errorf("%s: HTTP %d", p.name, resp.StatusCode)
-	}
 	const maxBody = 64 << 10
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBody+1))
 	if err != nil {
@@ -49,6 +46,9 @@ func (p *Provider) GetQuote(ctx context.Context, query quote.Query) (quote.Quote
 	}
 	if len(body) > maxBody {
 		return quote.Quote{}, fmt.Errorf("%s: response exceeds %d bytes", p.name, maxBody)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return quote.Quote{}, fmt.Errorf("%s: HTTP %d", p.name, resp.StatusCode)
 	}
 	var dto struct {
 		PriceMinor   int64  `json:"price_minor"`

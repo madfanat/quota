@@ -5,8 +5,9 @@ import (
 	"context"
 	"errors"
 	"slices"
-	"sync"
 	"time"
+
+	"golang.org/x/sync/errgroup"
 )
 
 type Provider interface {
@@ -15,17 +16,19 @@ type Provider interface {
 }
 
 type Service struct {
-	providers []Provider
-	permits   chan struct{}
+	providers       []Provider
+	permits         chan struct{}
+	providerTimeout time.Duration
 }
 
-func NewService(providers []Provider, maxCalls int) (*Service, error) {
-	if len(providers) == 0 || maxCalls < 1 {
-		return nil, errors.New("at least one provider and a positive provider limit are required")
+func NewService(providers []Provider, maxCalls int, providerTimeout time.Duration) (*Service, error) {
+	if len(providers) == 0 || maxCalls < 1 || providerTimeout <= 0 {
+		return nil, errors.New("at least one provider, a positive provider limit and timeout are required")
 	}
 	return &Service{
-		providers: slices.Clone(providers),
-		permits:   make(chan struct{}, maxCalls),
+		providers:       slices.Clone(providers),
+		permits:         make(chan struct{}, maxCalls),
+		providerTimeout: providerTimeout,
 	}, nil
 }
 
@@ -47,19 +50,24 @@ func (s *Service) getQuotes(ctx context.Context, query Query, concurrent bool) (
 		err   error
 	}
 	outcomes := make([]outcome, len(s.providers))
-	var wg sync.WaitGroup
+	group, groupCtx := errgroup.WithContext(ctx)
 	for i, provider := range s.providers {
-		fetch := func() {
-			outcomes[i].quote, outcomes[i].err = s.fetch(ctx, provider, query)
+		fetch := func() error {
+			outcomes[i].quote, outcomes[i].err = s.fetch(groupCtx, provider, query)
+			return ctx.Err()
 		}
 		if concurrent {
-			wg.Go(fetch)
+			group.Go(fetch)
 		} else {
-			fetch()
+			if err := fetch(); err != nil {
+				return Result{}, err
+			}
 		}
 	}
 
-	wg.Wait()
+	if err := group.Wait(); err != nil {
+		return Result{}, err
+	}
 	if err := ctx.Err(); err != nil {
 		return Result{}, err
 	}
@@ -98,10 +106,17 @@ func (s *Service) fetch(ctx context.Context, provider Provider, query Query) (Qu
 		return Quote{}, err
 	}
 	select {
+	case <-ctx.Done():
+		return Quote{}, ctx.Err()
 	case s.permits <- struct{}{}:
 		defer func() { <-s.permits }()
 	default:
 		return Quote{}, ErrBusy
 	}
+	if err := ctx.Err(); err != nil {
+		return Quote{}, err
+	}
+	ctx, cancel := context.WithTimeout(ctx, s.providerTimeout)
+	defer cancel()
 	return provider.GetQuote(ctx, query)
 }

@@ -3,6 +3,7 @@ package quote_test
 import (
 	"context"
 	"errors"
+	"reflect"
 	"strconv"
 	"sync"
 	"testing"
@@ -23,7 +24,7 @@ func (p provider) GetQuote(ctx context.Context, q quote.Query) (quote.Quote, err
 
 func newService(t *testing.T, providers []quote.Provider, limit int) *quote.Service {
 	t.Helper()
-	s, err := quote.NewService(providers, limit)
+	s, err := quote.NewService(providers, limit, time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -194,4 +195,109 @@ func TestGlobalLimit(t *testing.T) {
 	}
 	close(release)
 	wg.Wait()
+}
+
+func TestProviderTimeout(t *testing.T) {
+	for _, mode := range []string{"concurrent", "sequential"} {
+		t.Run(mode, func(t *testing.T) {
+			slow := provider{"slow", func(ctx context.Context, q quote.Query) (quote.Quote, error) {
+				if _, ok := ctx.Deadline(); !ok {
+					t.Error("provider has no deadline")
+				}
+				<-ctx.Done()
+				return quote.Quote{}, ctx.Err()
+			}}
+			healthy := provider{"healthy", func(ctx context.Context, q quote.Query) (quote.Quote, error) {
+				return quote.Quote{Provider: "healthy", PriceMinor: 100}, ctx.Err()
+			}}
+			s, err := quote.NewService([]quote.Provider{slow, healthy}, 2, 50*time.Millisecond)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			fetch := s.GetQuotes
+			if mode == "sequential" {
+				fetch = s.GetQuotesSequential
+			}
+			result, err := fetch(ctx, testQuery())
+			if err != nil || result.Complete || len(result.Quotes) != 1 || !reflect.DeepEqual(result.FailedProviders, []string{"slow"}) {
+				t.Fatalf("result = %+v, error = %v", result, err)
+			}
+			if ctx.Err() != nil {
+				t.Fatal("provider timeout cancelled its caller")
+			}
+		})
+	}
+}
+
+func TestEarlierCallerDeadline(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	wantDeadline, _ := ctx.Deadline()
+	p := provider{"swift", func(ctx context.Context, q quote.Query) (quote.Quote, error) {
+		deadline, ok := ctx.Deadline()
+		if !ok || !deadline.Equal(wantDeadline) {
+			t.Errorf("provider deadline = %v, want caller deadline %v", deadline, wantDeadline)
+		}
+		<-ctx.Done()
+		return quote.Quote{}, ctx.Err()
+	}}
+	s := newService(t, []quote.Provider{p}, 1)
+	if _, err := s.GetQuotes(ctx, testQuery()); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expired caller: error = %v", err)
+	}
+}
+
+func TestCancelledCallerAtCapacity(t *testing.T) {
+	started := make(chan struct{}, 1)
+	p := provider{"swift", func(ctx context.Context, q quote.Query) (quote.Quote, error) {
+		started <- struct{}{}
+		<-ctx.Done()
+		return quote.Quote{}, ctx.Err()
+	}}
+	s := newService(t, []quote.Provider{p}, 1)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { _, err := s.GetQuotes(ctx, testQuery()); done <- err }()
+	select {
+	case <-started:
+	case <-ctx.Done():
+		t.Fatal("provider did not start")
+	}
+	cancelled, stop := context.WithCancel(context.Background())
+	stop()
+	if _, err := s.GetQuotes(cancelled, testQuery()); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled request at capacity: error = %v", err)
+	}
+	cancel()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestConcurrentResultOrdering(t *testing.T) {
+	want := []quote.Quote{
+		{Provider: "steady", PriceMinor: 100},
+		{Provider: "swift", PriceMinor: 100},
+		{Provider: "budget", PriceMinor: 200},
+	}
+	var providers []quote.Provider
+	for _, item := range []quote.Quote{want[2], want[1], want[0]} {
+		providers = append(providers, provider{item.Provider, func(context.Context, quote.Query) (quote.Quote, error) {
+			return item, nil
+		}})
+	}
+	s := newService(t, providers, 48)
+	var callers sync.WaitGroup
+	for range 16 {
+		callers.Go(func() {
+			result, err := s.GetQuotes(context.Background(), testQuery())
+			if err != nil || !result.Complete || !reflect.DeepEqual(result.Quotes, want) {
+				t.Errorf("result = %+v, error = %v", result, err)
+			}
+		})
+	}
+	callers.Wait()
 }

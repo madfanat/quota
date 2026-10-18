@@ -5,6 +5,7 @@ import (
 	"errors"
 	"flag"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -29,15 +30,16 @@ func main() {
 		os.Exit(1)
 	}
 	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.MaxIdleConnsPerHost = *maxCalls
 	client := &http.Client{
-		Transport: transport, Timeout: *providerTimeout,
+		Transport:     transport,
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 	}
 	defer transport.CloseIdleConnections()
 	service, err := quote.NewService([]quote.Provider{
 		carrierhttp.New("swift", "http://127.0.0.1:8081/quote", client),
 		carrierhttp.New("steady", "http://127.0.0.1:8082/quote", client),
-	}, *maxCalls)
+	}, *maxCalls, *providerTimeout)
 	if err != nil {
 		slog.Error("configure service", "error", err)
 		os.Exit(1)
@@ -48,6 +50,7 @@ func main() {
 		Addr: *addr, Handler: httpapi.New(service, *maxRequests, *budget, *sequential),
 		ReadHeaderTimeout: 2 * time.Second, WriteTimeout: *budget + time.Second,
 		IdleTimeout: 30 * time.Second,
+		BaseContext: func(net.Listener) context.Context { return ctx },
 	}
 	shutdownDone := make(chan struct{})
 	go func() {
@@ -57,6 +60,7 @@ func main() {
 		defer cancel()
 		if err := server.Shutdown(shutdownCtx); err != nil {
 			slog.Error("shutdown", "error", err)
+			server.Close()
 		}
 	}()
 	slog.Info("quota listening", "address", *addr, "sequential", *sequential, "max_provider_calls", *maxCalls)
