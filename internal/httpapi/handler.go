@@ -9,12 +9,12 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/madfanat/quota/internal/quote"
+	"github.com/madfanat/quota/internal/quota"
 )
 
 type Service interface {
-	GetQuotes(context.Context, quote.Query) (quote.Result, error)
-	GetQuotesSequential(context.Context, quote.Query) (quote.Result, error)
+	GetQuotes(context.Context, quota.Query) (quota.Result, error)
+	GetQuotesSequential(context.Context, quota.Query) (quota.Result, error)
 }
 
 type Handler struct {
@@ -40,10 +40,10 @@ func (h *Handler) quotes(w http.ResponseWriter, r *http.Request) {
 	params := r.URL.Query()
 	weight, err := strconv.Atoi(params.Get("weight_grams"))
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": quote.ErrInvalidQuery.Error()})
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": quota.ErrInvalidQuery.Error()})
 		return
 	}
-	query, err := quote.NewQuery(params.Get("origin"), params.Get("destination"), weight)
+	query, err := quota.NewQuery(params.Get("origin"), params.Get("destination"), weight)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
@@ -59,7 +59,7 @@ func (h *Handler) quotes(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "request capacity exhausted"})
 		return
 	}
-	var result quote.Result
+	var result quota.Result
 	if h.sequential {
 		result, err = h.service.GetQuotesSequential(ctx, query)
 	} else {

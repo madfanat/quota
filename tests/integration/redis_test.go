@@ -4,6 +4,7 @@ package integration_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -17,7 +18,9 @@ import (
 	"time"
 
 	"github.com/madfanat/quota/internal/carrierhttp"
-	"github.com/madfanat/quota/internal/quote"
+	quotav1 "github.com/madfanat/quota/internal/gen/quota/v1"
+	"github.com/madfanat/quota/internal/httpapi"
+	"github.com/madfanat/quota/internal/quota"
 	"github.com/madfanat/quota/internal/redis"
 	"github.com/madfanat/quota/internal/simulators"
 	goredis "github.com/redis/go-redis/v9"
@@ -28,8 +31,8 @@ var redisWeight atomic.Int64
 type redisFixture struct {
 	ctx     context.Context
 	raw     *goredis.Client
-	service *quote.CachedService
-	query   quote.Query
+	service *quota.CachedService
+	query   quota.Query
 	sims    []*simulators.Simulator
 	started chan struct{}
 }
@@ -42,7 +45,7 @@ func newRedisFixture(t *testing.T, ttl time.Duration, failures int, gate <-chan 
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	f := &redisFixture{
-		ctx: ctx, query: quote.Query{Origin: "MOW", Destination: "LED", WeightGrams: 18000 + int(redisWeight.Add(1))},
+		ctx: ctx, query: quota.Query{Origin: "MOW", Destination: "LED", WeightGrams: 18000 + int(redisWeight.Add(1))},
 		started: make(chan struct{}, 64),
 	}
 	f.raw = goredis.NewClient(&goredis.Options{Addr: addr, Protocol: 2, MaxRetries: -1, ContextTimeoutEnabled: true})
@@ -56,7 +59,7 @@ func newRedisFixture(t *testing.T, ttl time.Duration, failures int, gate <-chan 
 		defer cancel()
 		f.raw.Del(ctx, f.key())
 	})
-	var providers []quote.Provider
+	var providers []quota.Provider
 	for i, name := range []string{"swift", "steady"} {
 		sim := simulators.New(name, 0, i < failures)
 		f.sims = append(f.sims, sim)
@@ -75,7 +78,7 @@ func newRedisFixture(t *testing.T, ttl time.Duration, failures int, gate <-chan 
 		t.Cleanup(server.Close)
 		providers = append(providers, carrierhttp.New(name, server.URL+"/quote", server.Client()))
 	}
-	service, err := quote.NewService(providers, 2, 2*time.Second)
+	service, err := quota.NewService(providers, 2, 2*time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -84,7 +87,7 @@ func newRedisFixture(t *testing.T, ttl time.Duration, failures int, gate <-chan 
 	}
 	cache := redis.New(cacheAddr, 100*time.Millisecond, 32)
 	t.Cleanup(func() { cache.Close() })
-	f.service, err = quote.NewCachedService(ctx, service, cache, quote.CacheConfig{
+	f.service, err = quota.NewCachedService(ctx, service, cache, quota.CacheConfig{
 		TTL: ttl, Timeout: 100 * time.Millisecond, WorkTimeout: 3 * time.Second, MaxRequests: 32,
 	})
 	if err != nil {
@@ -98,7 +101,7 @@ func (f *redisFixture) key() string {
 	return fmt.Sprintf("quota:quotes:v1:%s:%s:%d", f.query.Origin, f.query.Destination, f.query.WeightGrams)
 }
 
-func (f *redisFixture) get(t *testing.T) quote.Result {
+func (f *redisFixture) get(t *testing.T) quota.Result {
 	t.Helper()
 	result, err := f.service.GetQuotes(f.ctx, f.query)
 	if err != nil {
@@ -126,7 +129,7 @@ func TestRedisHitMissAndExpiry(t *testing.T) {
 		t.Fatalf("normalized cache hit: result = %+v, error = %v", second, err)
 	}
 	f.assertCalls(t, 1)
-	if stats := f.service.Stats(); stats != (quote.CacheStats{Hits: 1, Misses: 1}) {
+	if stats := f.service.Stats(); stats != (quota.CacheStats{Hits: 1, Misses: 1}) {
 		t.Fatalf("stats = %+v", stats)
 	}
 	ttl, err := f.raw.PTTL(f.ctx, f.key()).Result()
@@ -156,6 +159,31 @@ func TestRedisHitMissAndExpiry(t *testing.T) {
 	f.assertCalls(t, 2)
 }
 
+func TestHTTPAndGRPCShareRedisCache(t *testing.T) {
+	f := newRedisFixture(t, time.Second, 0, nil, "")
+	client := grpcClient(t, f.service, time.Second)
+	response, err := client.GetQuotes(f.ctx, &quotav1.GetQuotesRequest{
+		Origin: f.query.Origin, Destination: f.query.Destination, WeightGrams: int32(f.query.WeightGrams),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := httptest.NewRecorder()
+	httpapi.New(f.service, 32, time.Second, false).ServeHTTP(w, httptest.NewRequest("GET",
+		fmt.Sprintf("/v1/quotes?origin=MOW&destination=LED&weight_grams=%d", f.query.WeightGrams), nil))
+	var rest quota.Result
+	if err := json.Unmarshal(w.Body.Bytes(), &rest); err != nil {
+		t.Fatal(err)
+	}
+	if w.Code != 200 || !reflect.DeepEqual(rest, rpcResult(response)) {
+		t.Fatalf("cached HTTP = %+v, gRPC = %+v", rest, rpcResult(response))
+	}
+	f.assertCalls(t, 1)
+	if stats := f.service.Stats(); stats != (quota.CacheStats{Misses: 1, Hits: 1}) {
+		t.Fatalf("both transports must share the cache: %+v", stats)
+	}
+}
+
 func TestRedisCorruptDataIsRefetched(t *testing.T) {
 	for _, data := range []string{`{`, `{"complete":true,"quotes":[],"generated_at":"2026-10-18T00:00:00Z"}`} {
 		f := newRedisFixture(t, time.Second, 0, nil, "")
@@ -182,7 +210,7 @@ func TestRedisSkipsPartialAndErrorResults(t *testing.T) {
 			if failures == 1 && (err != nil || result.Complete || len(result.Quotes) != 1) {
 				t.Fatalf("partial result = %+v, error = %v", result, err)
 			}
-			if failures == 2 && !errors.Is(err, quote.ErrUnavailable) {
+			if failures == 2 && !errors.Is(err, quota.ErrUnavailable) {
 				t.Fatalf("all failed: %v", err)
 			}
 		}
@@ -210,7 +238,7 @@ func TestRedisConcurrentMissesShareFetch(t *testing.T) {
 	unblock := func() { once.Do(func() { close(release) }) }
 	defer unblock()
 	f := newRedisFixture(t, time.Second, 0, release, "")
-	results := make(chan quote.Result, 20)
+	results := make(chan quota.Result, 20)
 	for range 20 {
 		ctx := &registeredContext{Context: f.ctx, registered: make(chan struct{})}
 		go func() {
@@ -227,7 +255,7 @@ func TestRedisConcurrentMissesShareFetch(t *testing.T) {
 		}
 	}
 	unblock()
-	var first quote.Result
+	var first quota.Result
 	for i := range 20 {
 		result := <-results
 		if !result.Complete {
@@ -240,7 +268,7 @@ func TestRedisConcurrentMissesShareFetch(t *testing.T) {
 		}
 	}
 	f.assertCalls(t, 1)
-	if stats := f.service.Stats(); stats != (quote.CacheStats{Misses: 1}) {
+	if stats := f.service.Stats(); stats != (quota.CacheStats{Misses: 1}) {
 		t.Fatalf("shared miss stats = %+v", stats)
 	}
 }
@@ -257,7 +285,7 @@ func TestRedisOutageFallsBackWithProviderLimit(t *testing.T) {
 	unblock := func() { once.Do(func() { close(release) }) }
 	defer unblock()
 	f := newRedisFixture(t, time.Second, 0, release, addr)
-	first := make(chan quote.Result, 1)
+	first := make(chan quota.Result, 1)
 	go func() {
 		result, err := f.service.GetQuotes(f.ctx, f.query)
 		if err != nil {
@@ -277,7 +305,7 @@ func TestRedisOutageFallsBackWithProviderLimit(t *testing.T) {
 		callers.Go(func() {
 			query := f.query
 			query.WeightGrams += 100 + i
-			if _, err := f.service.GetQuotes(f.ctx, query); !errors.Is(err, quote.ErrBusy) {
+			if _, err := f.service.GetQuotes(f.ctx, query); !errors.Is(err, quota.ErrBusy) {
 				t.Errorf("provider limit during Redis outage: %v", err)
 			}
 		})

@@ -1,4 +1,4 @@
-package quote
+package quota
 
 import (
 	"context"
@@ -60,7 +60,6 @@ func cacheConfig() CacheConfig {
 	return CacheConfig{TTL: 30 * time.Second, Timeout: 20 * time.Millisecond, WorkTimeout: time.Second, MaxRequests: 8}
 }
 
-// Done is evaluated by GetQuotes after its waiter has joined singleflight.
 type waitingContext struct {
 	context.Context
 	waiting chan struct{}

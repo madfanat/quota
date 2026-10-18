@@ -12,7 +12,7 @@ import (
 
 	"github.com/madfanat/quota/internal/carrierhttp"
 	"github.com/madfanat/quota/internal/httpapi"
-	"github.com/madfanat/quota/internal/quote"
+	"github.com/madfanat/quota/internal/quota"
 	"github.com/madfanat/quota/internal/simulators"
 )
 
@@ -22,7 +22,7 @@ func TestHTTPQuotes(t *testing.T) {
 	steady := httptest.NewServer(simulators.New("steady", 0, false).Handler())
 	defer steady.Close()
 	client := &http.Client{Timeout: time.Second}
-	service, err := quote.NewService([]quote.Provider{
+	service, err := quota.NewService([]quota.Provider{
 		carrierhttp.New("swift", swift.URL+"/quote", client),
 		carrierhttp.New("steady", steady.URL+"/quote", client),
 	}, 2, time.Second)
@@ -50,7 +50,7 @@ func TestHTTPQuotes(t *testing.T) {
 			if tc.status != 200 {
 				return
 			}
-			var result quote.Result
+			var result quota.Result
 			if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
 				t.Fatal(err)
 			}
@@ -92,12 +92,12 @@ func TestSimulatorsObserveGlobalLimit(t *testing.T) {
 		t.Cleanup(server.Close)
 		return carrierhttp.New(name, server.URL+"/quote", &http.Client{Timeout: 4 * time.Second})
 	}
-	service, err := quote.NewService([]quote.Provider{newProvider("swift"), newProvider("steady")}, 2, time.Second)
+	service, err := quota.NewService([]quota.Provider{newProvider("swift"), newProvider("steady")}, 2, time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
 	done := make(chan error, 1)
-	query := quote.Query{Origin: "MOW", Destination: "LED", WeightGrams: 1000}
+	query := quota.Query{Origin: "MOW", Destination: "LED", WeightGrams: 1000}
 	go func() { _, err := service.GetQuotes(ctx, query); done <- err }()
 	for range 2 {
 		select {
@@ -110,7 +110,7 @@ func TestSimulatorsObserveGlobalLimit(t *testing.T) {
 	for range 12 {
 		wg.Go(func() {
 			_, err := service.GetQuotes(ctx, query)
-			if err != quote.ErrBusy {
+			if err != quota.ErrBusy {
 				t.Errorf("saturated request: error = %v", err)
 			}
 		})
@@ -129,7 +129,7 @@ func TestSimulatorsObserveGlobalLimit(t *testing.T) {
 
 func TestDelayedProviders(t *testing.T) {
 	var sims []*simulators.Simulator
-	var providers []quote.Provider
+	var providers []quota.Provider
 
 	for _, name := range []string{"swift", "steady"} {
 		sim := simulators.New(name, 100*time.Millisecond, false)
@@ -138,11 +138,11 @@ func TestDelayedProviders(t *testing.T) {
 		sims = append(sims, sim)
 		providers = append(providers, carrierhttp.New(name, server.URL+"/quote", &http.Client{Timeout: time.Second}))
 	}
-	service, err := quote.NewService(providers, 2, time.Second)
+	service, err := quota.NewService(providers, 2, time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
-	query := quote.Query{Origin: "MOW", Destination: "LED", WeightGrams: 1000}
+	query := quota.Query{Origin: "MOW", Destination: "LED", WeightGrams: 1000}
 	start := time.Now()
 	if _, err := service.GetQuotesSequential(context.Background(), query); err != nil {
 		t.Fatal(err)
@@ -180,7 +180,7 @@ func TestHTTPProviderFailures(t *testing.T) {
 		{"request deadline", "slow", true, 50 * time.Millisecond, time.Second, 504},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			newProvider := func(name string, broken bool) quote.Provider {
+			newProvider := func(name string, broken bool) quota.Provider {
 				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					if broken {
 						switch tc.broken {
@@ -198,7 +198,7 @@ func TestHTTPProviderFailures(t *testing.T) {
 				t.Cleanup(server.Close)
 				return carrierhttp.New(name, server.URL+"/quote", server.Client())
 			}
-			service, err := quote.NewService([]quote.Provider{
+			service, err := quota.NewService([]quota.Provider{
 				newProvider("swift", true), newProvider("steady", tc.bothBroken),
 			}, 2, tc.providerTimeout)
 			if err != nil {
@@ -211,7 +211,7 @@ func TestHTTPProviderFailures(t *testing.T) {
 				t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
 			}
 			if tc.status == 200 {
-				var result quote.Result
+				var result quota.Result
 				if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
 					t.Fatal(err)
 				}
@@ -228,7 +228,7 @@ func TestRepeatedHTTPCancellation(t *testing.T) {
 	defer cancel()
 	started := make(chan struct{}, 2)
 	stopped := make(chan struct{}, 2)
-	var providers []quote.Provider
+	var providers []quota.Provider
 	for _, name := range []string{"swift", "steady"} {
 		sim := simulators.New(name, 0, false).Handler()
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -243,7 +243,7 @@ func TestRepeatedHTTPCancellation(t *testing.T) {
 		t.Cleanup(server.Close)
 		providers = append(providers, carrierhttp.New(name, server.URL+"/quote", server.Client()))
 	}
-	service, err := quote.NewService(providers, 2, time.Second)
+	service, err := quota.NewService(providers, 2, time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -279,7 +279,7 @@ func TestRepeatedHTTPCancellation(t *testing.T) {
 		}
 		w := httptest.NewRecorder()
 		handler.ServeHTTP(w, httptest.NewRequest("GET", "/v1/quotes?origin=MOW&destination=LED&weight_grams=2000", nil).WithContext(ctx))
-		var result quote.Result
+		var result quota.Result
 		if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
 			t.Fatal(err)
 		}

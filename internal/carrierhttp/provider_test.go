@@ -11,12 +11,12 @@ import (
 	"time"
 
 	"github.com/madfanat/quota/internal/carrierhttp"
-	"github.com/madfanat/quota/internal/quote"
+	"github.com/madfanat/quota/internal/quota"
 )
 
 const validQuote = `{"price_minor":35000,"currency":"RUB","estimate_days":3}`
 
-var query = quote.Query{Origin: "MOW", Destination: "LED", WeightGrams: 1000}
+var query = quota.Query{Origin: "MOW", Destination: "LED", WeightGrams: 1000}
 
 func TestGetQuote(t *testing.T) {
 	for _, tc := range []struct {
@@ -52,7 +52,7 @@ func TestGetQuote(t *testing.T) {
 				}
 				return
 			}
-			want := quote.Quote{Provider: "steady", PriceMinor: 35000, Currency: "RUB", EstimateDays: 3}
+			want := quota.Quote{Provider: "steady", PriceMinor: 35000, Currency: "RUB", EstimateDays: 3}
 			if err != nil || result != want {
 				t.Fatalf("quote = %+v, error = %v", result, err)
 			}

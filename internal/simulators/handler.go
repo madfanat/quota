@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/madfanat/quota/internal/quote"
+	"github.com/madfanat/quota/internal/quota"
 )
 
 type Stats struct {
@@ -51,10 +51,10 @@ func (s *Simulator) quote(w http.ResponseWriter, r *http.Request) {
 	params := r.URL.Query()
 	weight, err := strconv.Atoi(params.Get("weight_grams"))
 	if err != nil {
-		http.Error(w, quote.ErrInvalidQuery.Error(), http.StatusBadRequest)
+		http.Error(w, quota.ErrInvalidQuery.Error(), http.StatusBadRequest)
 		return
 	}
-	query, err := quote.NewQuery(params.Get("origin"), params.Get("destination"), weight)
+	query, err := quota.NewQuery(params.Get("origin"), params.Get("destination"), weight)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return

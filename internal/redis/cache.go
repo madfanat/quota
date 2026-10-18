@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/madfanat/quota/internal/quote"
+	"github.com/madfanat/quota/internal/quota"
 	goredis "github.com/redis/go-redis/v9"
 )
 
@@ -24,22 +24,22 @@ func New(addr string, timeout time.Duration, poolSize int) *Cache {
 	})}
 }
 
-func (c *Cache) Get(ctx context.Context, query quote.Query) (quote.Result, error) {
+func (c *Cache) Get(ctx context.Context, query quota.Query) (quota.Result, error) {
 	data, err := c.client.Get(ctx, key(query)).Bytes()
 	if errors.Is(err, goredis.Nil) {
-		return quote.Result{}, quote.ErrCacheMiss
+		return quota.Result{}, quota.ErrCacheMiss
 	}
 	if err != nil {
-		return quote.Result{}, err
+		return quota.Result{}, err
 	}
-	var result quote.Result
+	var result quota.Result
 	if err := json.Unmarshal(data, &result); err != nil {
-		return quote.Result{}, fmt.Errorf("corrupt cached quote: %w", err)
+		return quota.Result{}, fmt.Errorf("corrupt cached quote: %w", err)
 	}
 	return result, nil
 }
 
-func (c *Cache) Set(ctx context.Context, query quote.Query, result quote.Result, ttl time.Duration) error {
+func (c *Cache) Set(ctx context.Context, query quota.Query, result quota.Result, ttl time.Duration) error {
 	data, err := json.Marshal(result)
 	if err != nil {
 		return err
@@ -49,6 +49,6 @@ func (c *Cache) Set(ctx context.Context, query quote.Query, result quote.Result,
 
 func (c *Cache) Close() error { return c.client.Close() }
 
-func key(query quote.Query) string {
+func key(query quota.Query) string {
 	return fmt.Sprintf("quota:quotes:v1:%s:%s:%d", query.Origin, query.Destination, query.WeightGrams)
 }

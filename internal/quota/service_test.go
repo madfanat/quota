@@ -1,4 +1,4 @@
-package quote_test
+package quota_test
 
 import (
 	"context"
@@ -9,44 +9,44 @@ import (
 	"testing"
 	"time"
 
-	"github.com/madfanat/quota/internal/quote"
+	"github.com/madfanat/quota/internal/quota"
 )
 
 type provider struct {
 	name  string
-	fetch func(context.Context, quote.Query) (quote.Quote, error)
+	fetch func(context.Context, quota.Query) (quota.Quote, error)
 }
 
 func (p provider) Name() string { return p.name }
-func (p provider) GetQuote(ctx context.Context, q quote.Query) (quote.Quote, error) {
+func (p provider) GetQuote(ctx context.Context, q quota.Query) (quota.Quote, error) {
 	return p.fetch(ctx, q)
 }
 
-func newService(t *testing.T, providers []quote.Provider, limit int) *quote.Service {
+func newService(t *testing.T, providers []quota.Provider, limit int) *quota.Service {
 	t.Helper()
-	s, err := quote.NewService(providers, limit, time.Second)
+	s, err := quota.NewService(providers, limit, time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return s
 }
 
-func testQuery() quote.Query {
-	return quote.Query{Origin: "MOW", Destination: "LED", WeightGrams: 1000}
+func testQuery() quota.Query {
+	return quota.Query{Origin: "MOW", Destination: "LED", WeightGrams: 1000}
 }
 
 func TestNewQuery(t *testing.T) {
-	q, err := quote.NewQuery(" mow ", "led", 1000)
+	q, err := quota.NewQuery(" mow ", "led", 1000)
 	if err != nil || q != testQuery() {
 		t.Fatalf("query = %+v, error = %v", q, err)
 	}
-	for _, q := range []quote.Query{
+	for _, q := range []quota.Query{
 		{Origin: "XXX", Destination: "LED", WeightGrams: 1000},
 		{Origin: "MOW", Destination: "", WeightGrams: 1000},
 		{Origin: "MOW", Destination: "LED", WeightGrams: 0},
 		{Origin: "MOW", Destination: "LED", WeightGrams: 30001},
 	} {
-		if _, err := quote.NewQuery(q.Origin, q.Destination, q.WeightGrams); !errors.Is(err, quote.ErrInvalidQuery) {
+		if _, err := quota.NewQuery(q.Origin, q.Destination, q.WeightGrams); !errors.Is(err, quota.ErrInvalidQuery) {
 			t.Fatalf("query %+v: error = %v", q, err)
 		}
 	}
@@ -58,17 +58,17 @@ func TestProvidersStartConcurrently(t *testing.T) {
 	started := make(chan string, 2)
 	release := make(chan struct{})
 	makeProvider := func(name string) provider {
-		return provider{name, func(ctx context.Context, q quote.Query) (quote.Quote, error) {
+		return provider{name, func(ctx context.Context, q quota.Query) (quota.Quote, error) {
 			started <- name
 			select {
 			case <-release:
-				return quote.Quote{Provider: name, PriceMinor: 100, Currency: "RUB", EstimateDays: 1}, nil
+				return quota.Quote{Provider: name, PriceMinor: 100, Currency: "RUB", EstimateDays: 1}, nil
 			case <-ctx.Done():
-				return quote.Quote{}, ctx.Err()
+				return quota.Quote{}, ctx.Err()
 			}
 		}}
 	}
-	s := newService(t, []quote.Provider{makeProvider("swift"), makeProvider("steady")}, 2)
+	s := newService(t, []quota.Provider{makeProvider("swift"), makeProvider("steady")}, 2)
 	done := make(chan error, 1)
 	go func() {
 		result, err := s.GetQuotes(ctx, testQuery())
@@ -94,13 +94,13 @@ func TestResultAndFailures(t *testing.T) {
 	for _, mode := range []string{"concurrent", "sequential"} {
 		for _, failures := range []int{0, 1, 2} {
 			t.Run(mode+"/failures="+strconv.Itoa(failures), func(t *testing.T) {
-				providers := make([]quote.Provider, 2)
+				providers := make([]quota.Provider, 2)
 				for i, name := range []string{"swift", "steady"} {
-					providers[i] = provider{name, func(ctx context.Context, q quote.Query) (quote.Quote, error) {
+					providers[i] = provider{name, func(ctx context.Context, q quota.Query) (quota.Quote, error) {
 						if i < failures {
-							return quote.Quote{}, errors.New("offline")
+							return quota.Quote{}, errors.New("offline")
 						}
-						return quote.Quote{Provider: name, PriceMinor: 100, Currency: "RUB", EstimateDays: 1}, nil
+						return quota.Quote{Provider: name, PriceMinor: 100, Currency: "RUB", EstimateDays: 1}, nil
 					}}
 				}
 				s := newService(t, providers, 2)
@@ -110,7 +110,7 @@ func TestResultAndFailures(t *testing.T) {
 				}
 				result, err := fetch(context.Background(), testQuery())
 				if failures == 2 {
-					if !errors.Is(err, quote.ErrUnavailable) {
+					if !errors.Is(err, quota.ErrUnavailable) {
 						t.Fatalf("error = %v", err)
 					}
 					return
@@ -128,12 +128,12 @@ func TestResultAndFailures(t *testing.T) {
 
 func TestCancellationReturnsPermit(t *testing.T) {
 	started := make(chan struct{}, 1)
-	p := provider{"swift", func(ctx context.Context, q quote.Query) (quote.Quote, error) {
+	p := provider{"swift", func(ctx context.Context, q quota.Query) (quota.Quote, error) {
 		started <- struct{}{}
 		<-ctx.Done()
-		return quote.Quote{}, ctx.Err()
+		return quota.Quote{}, ctx.Err()
 	}}
-	s := newService(t, []quote.Provider{p}, 1)
+	s := newService(t, []quota.Provider{p}, 1)
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	done := make(chan error, 1)
@@ -167,16 +167,16 @@ func TestGlobalLimit(t *testing.T) {
 	defer cancel()
 	started := make(chan struct{}, 2)
 	release := make(chan struct{})
-	p := provider{"swift", func(ctx context.Context, q quote.Query) (quote.Quote, error) {
+	p := provider{"swift", func(ctx context.Context, q quota.Query) (quota.Quote, error) {
 		started <- struct{}{}
 		select {
 		case <-release:
-			return quote.Quote{Provider: "swift", PriceMinor: 100}, nil
+			return quota.Quote{Provider: "swift", PriceMinor: 100}, nil
 		case <-ctx.Done():
-			return quote.Quote{}, ctx.Err()
+			return quota.Quote{}, ctx.Err()
 		}
 	}}
-	s := newService(t, []quote.Provider{p}, 2)
+	s := newService(t, []quota.Provider{p}, 2)
 	var wg sync.WaitGroup
 	for range 2 {
 		wg.Go(func() { s.GetQuotes(ctx, testQuery()) })
@@ -189,7 +189,7 @@ func TestGlobalLimit(t *testing.T) {
 		}
 	}
 	for range 10 {
-		if _, err := s.GetQuotes(ctx, testQuery()); !errors.Is(err, quote.ErrBusy) {
+		if _, err := s.GetQuotes(ctx, testQuery()); !errors.Is(err, quota.ErrBusy) {
 			t.Fatalf("saturated call: error = %v", err)
 		}
 	}
@@ -200,17 +200,17 @@ func TestGlobalLimit(t *testing.T) {
 func TestProviderTimeout(t *testing.T) {
 	for _, mode := range []string{"concurrent", "sequential"} {
 		t.Run(mode, func(t *testing.T) {
-			slow := provider{"slow", func(ctx context.Context, q quote.Query) (quote.Quote, error) {
+			slow := provider{"slow", func(ctx context.Context, q quota.Query) (quota.Quote, error) {
 				if _, ok := ctx.Deadline(); !ok {
 					t.Error("provider has no deadline")
 				}
 				<-ctx.Done()
-				return quote.Quote{}, ctx.Err()
+				return quota.Quote{}, ctx.Err()
 			}}
-			healthy := provider{"healthy", func(ctx context.Context, q quote.Query) (quote.Quote, error) {
-				return quote.Quote{Provider: "healthy", PriceMinor: 100}, ctx.Err()
+			healthy := provider{"healthy", func(ctx context.Context, q quota.Query) (quota.Quote, error) {
+				return quota.Quote{Provider: "healthy", PriceMinor: 100}, ctx.Err()
 			}}
-			s, err := quote.NewService([]quote.Provider{slow, healthy}, 2, 50*time.Millisecond)
+			s, err := quota.NewService([]quota.Provider{slow, healthy}, 2, 50*time.Millisecond)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -235,15 +235,15 @@ func TestEarlierCallerDeadline(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
 	wantDeadline, _ := ctx.Deadline()
-	p := provider{"swift", func(ctx context.Context, q quote.Query) (quote.Quote, error) {
+	p := provider{"swift", func(ctx context.Context, q quota.Query) (quota.Quote, error) {
 		deadline, ok := ctx.Deadline()
 		if !ok || !deadline.Equal(wantDeadline) {
 			t.Errorf("provider deadline = %v, want caller deadline %v", deadline, wantDeadline)
 		}
 		<-ctx.Done()
-		return quote.Quote{}, ctx.Err()
+		return quota.Quote{}, ctx.Err()
 	}}
-	s := newService(t, []quote.Provider{p}, 1)
+	s := newService(t, []quota.Provider{p}, 1)
 	if _, err := s.GetQuotes(ctx, testQuery()); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("expired caller: error = %v", err)
 	}
@@ -251,12 +251,12 @@ func TestEarlierCallerDeadline(t *testing.T) {
 
 func TestCancelledCallerAtCapacity(t *testing.T) {
 	started := make(chan struct{}, 1)
-	p := provider{"swift", func(ctx context.Context, q quote.Query) (quote.Quote, error) {
+	p := provider{"swift", func(ctx context.Context, q quota.Query) (quota.Quote, error) {
 		started <- struct{}{}
 		<-ctx.Done()
-		return quote.Quote{}, ctx.Err()
+		return quota.Quote{}, ctx.Err()
 	}}
-	s := newService(t, []quote.Provider{p}, 1)
+	s := newService(t, []quota.Provider{p}, 1)
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	done := make(chan error, 1)
@@ -278,14 +278,14 @@ func TestCancelledCallerAtCapacity(t *testing.T) {
 }
 
 func TestConcurrentResultOrdering(t *testing.T) {
-	want := []quote.Quote{
+	want := []quota.Quote{
 		{Provider: "steady", PriceMinor: 100},
 		{Provider: "swift", PriceMinor: 100},
 		{Provider: "budget", PriceMinor: 200},
 	}
-	var providers []quote.Provider
-	for _, item := range []quote.Quote{want[2], want[1], want[0]} {
-		providers = append(providers, provider{item.Provider, func(context.Context, quote.Query) (quote.Quote, error) {
+	var providers []quota.Provider
+	for _, item := range []quota.Quote{want[2], want[1], want[0]} {
+		providers = append(providers, provider{item.Provider, func(context.Context, quota.Query) (quota.Quote, error) {
 			return item, nil
 		}})
 	}

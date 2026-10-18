@@ -1,0 +1,31 @@
+syntax = "proto3";
+
+package quota.v1;
+
+option go_package = "github.com/madfanat/quota/internal/gen/quota/v1;quotav1";
+
+import "google/protobuf/timestamp.proto";
+
+service QuotaService {
+  rpc GetQuotes(GetQuotesRequest) returns (GetQuotesResponse);
+}
+
+message GetQuotesRequest {
+  string origin = 1;
+  string destination = 2;
+  int32 weight_grams = 3;
+}
+
+message Quote {
+  string provider = 1;
+  int64 price_minor = 2;
+  string currency = 3;
+  int64 estimate_days = 4;
+}
+
+message GetQuotesResponse {
+  repeated Quote quotes = 1;
+  bool complete = 2;
+  repeated string failed_providers = 3;
+  google.protobuf.Timestamp generated_at = 4;
+}

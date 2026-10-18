@@ -1,4 +1,4 @@
-package quote
+package quota
 
 import (
 	"context"
@@ -77,7 +77,7 @@ func (s *CachedService) GetQuotes(ctx context.Context, query Query) (Result, err
 	})
 	select {
 	case <-ctx.Done():
-		// Keep the slot until shared work finishes, bounding abandoned waiters too.
+
 		go func() { <-done; <-s.callers }()
 		return Result{}, ctx.Err()
 	case shared := <-done:
@@ -95,7 +95,6 @@ func (s *CachedService) GetQuotes(ctx context.Context, query Query) (Result, err
 	}
 }
 
-// The sequential learning baseline bypasses caching and shared work.
 func (s *CachedService) GetQuotesSequential(ctx context.Context, query Query) (Result, error) {
 	return s.service.GetQuotesSequential(ctx, query)
 }

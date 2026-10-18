@@ -1,4 +1,4 @@
-package quote
+package quota
 
 import (
 	"errors"
