@@ -1,0 +1,77 @@
+package httpapi
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"log/slog"
+	"net/http"
+	"strconv"
+	"time"
+
+	"github.com/madfanat/quota/internal/quote"
+)
+
+type Handler struct {
+	service    *quote.Service
+	admission  chan struct{}
+	budget     time.Duration
+	sequential bool
+}
+
+func New(service *quote.Service, maxRequests int, budget time.Duration, sequential bool) http.Handler {
+	h := &Handler{service: service, admission: make(chan struct{}, maxRequests), budget: budget, sequential: sequential}
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /v1/quotes", h.quotes)
+	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	return mux
+}
+
+func (h *Handler) quotes(w http.ResponseWriter, r *http.Request) {
+	params := r.URL.Query()
+	weight, err := strconv.Atoi(params.Get("weight_grams"))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": quote.ErrInvalidQuery.Error()})
+		return
+	}
+	query, err := quote.NewQuery(params.Get("origin"), params.Get("destination"), weight)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	select {
+	case h.admission <- struct{}{}:
+		defer func() { <-h.admission }()
+	default:
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "request capacity exhausted"})
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), h.budget)
+	defer cancel()
+	var result quote.Result
+	if h.sequential {
+		result, err = h.service.GetQuotesSequential(ctx, query)
+	} else {
+		result, err = h.service.GetQuotes(ctx, query)
+	}
+	if err != nil {
+		status := http.StatusServiceUnavailable
+		if errors.Is(err, context.DeadlineExceeded) {
+			status = http.StatusGatewayTimeout
+		}
+		slog.Warn("quote request failed", "error", err)
+		writeJSON(w, status, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+func writeJSON(w http.ResponseWriter, status int, value any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	if err := json.NewEncoder(w).Encode(value); err != nil {
+		slog.Warn("write response", "error", err)
+	}
+}
